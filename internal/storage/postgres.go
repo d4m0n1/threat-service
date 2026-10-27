@@ -1,3 +1,4 @@
+// Package storage реализует хранение угроз в PostgreSQL.
 package storage
 
 import (
@@ -12,18 +13,23 @@ import (
 	"github.com/d4m0n1/threat-service/internal/model"
 )
 
+// pgUniqueViolation — код ошибки Postgres при нарушении уникальности.
 const pgUniqueViolation = "23505"
 
+// columns — порядок колонок в SELECT/RETURNING; должен совпадать с порядком в scanThreat.
 const columns = `md5, name, severity, sha256, file_size, first_seen, last_seen, description, created_at, updated_at`
 
+// Postgres — хранилище угроз поверх пула соединений pgx.
 type Postgres struct {
 	pool *pgxpool.Pool
 }
 
+// New создаёт хранилище. Пулом владеет вызывающий код (он же его закрывает).
 func New(pool *pgxpool.Pool) *Postgres {
 	return &Postgres{pool: pool}
 }
 
+// Create сохраняет новую угрозу. Возвращает model.ErrAlreadyExists, если MD5 уже занят.
 func (s *Postgres) Create(ctx context.Context, t model.Threat) (model.Threat, error) {
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO threats (md5, name, severity, sha256, file_size, first_seen, last_seen, description)
@@ -42,6 +48,7 @@ func (s *Postgres) Create(ctx context.Context, t model.Threat) (model.Threat, er
 	return res, nil
 }
 
+// Get возвращает угрозу по MD5 или model.ErrNotFound.
 func (s *Postgres) Get(ctx context.Context, md5 string) (model.Threat, error) {
 	row := s.pool.QueryRow(ctx, `SELECT `+columns+` FROM threats WHERE md5 = $1`, md5)
 
@@ -55,6 +62,8 @@ func (s *Postgres) Get(ctx context.Context, md5 string) (model.Threat, error) {
 	return res, nil
 }
 
+// Update полностью заменяет данные угрозы (кроме md5 и created_at) и обновляет updated_at.
+// Возвращает model.ErrNotFound, если записи нет.
 func (s *Postgres) Update(ctx context.Context, t model.Threat) (model.Threat, error) {
 	row := s.pool.QueryRow(ctx, `
 		UPDATE threats
@@ -74,6 +83,7 @@ func (s *Postgres) Update(ctx context.Context, t model.Threat) (model.Threat, er
 	return res, nil
 }
 
+// scanThreat читает строку результата в порядке, заданном в columns.
 func scanThreat(row pgx.Row) (model.Threat, error) {
 	var t model.Threat
 	err := row.Scan(&t.MD5, &t.Name, &t.Severity, &t.SHA256, &t.FileSize,
