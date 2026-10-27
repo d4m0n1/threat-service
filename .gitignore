@@ -32,3 +32,6 @@ go.work.sum
 # .idea/
 # .vscode/
 .DS_Store
+
+# Локальные TLS-сертификаты (генерируются scripts/gen-certs.sh)
+certs/

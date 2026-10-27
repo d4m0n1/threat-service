@@ -2,13 +2,16 @@
 //
 // Переменные окружения:
 //
-//	HTTP_ADDR     адрес, на котором слушает сервер (по умолчанию ":8080")
-//	DATABASE_URL  строка подключения к PostgreSQL
-//	API_KEYS      API-ключи с ролями: "key1:writer,key2:reader" (ключ — не короче 16 символов)
+//	HTTP_ADDR      адрес сервера (по умолчанию ":8443" с TLS, ":8080" без него)
+//	DATABASE_URL   строка подключения к PostgreSQL
+//	API_KEYS       API-ключи с ролями: "key1:writer,key2:reader" (ключ — не короче 16 символов)
+//	TLS_CERT_FILE  путь к TLS-сертификату (PEM)
+//	TLS_KEY_FILE   путь к приватному ключу (PEM); без обеих TLS-переменных сервер работает по HTTP
 package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -43,7 +46,16 @@ func main() {
 
 // run собирает зависимости, запускает сервер и корректно останавливает его по сигналу.
 func run(log *slog.Logger) error {
-	addr := getenv("HTTP_ADDR", ":8080")
+	tlsConfig, err := loadTLSConfig(os.Getenv("TLS_CERT_FILE"), os.Getenv("TLS_KEY_FILE"))
+	if err != nil {
+		return err
+	}
+	defaultAddr := ":8443"
+	if tlsConfig == nil {
+		defaultAddr = ":8080"
+		log.Warn("TLS is disabled: TLS_CERT_FILE and TLS_KEY_FILE are not set, serving plain HTTP")
+	}
+	addr := getenv("HTTP_ADDR", defaultAddr)
 	dbURL := getenv("DATABASE_URL", "postgres://threat:threat@localhost:5434/threats?sslmode=disable")
 
 	apiKeys, err := middleware.ParseAPIKeys(os.Getenv("API_KEYS"))
@@ -98,12 +110,20 @@ func run(log *slog.Logger) error {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		TLSConfig:         tlsConfig,
 	}
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("server started", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Info("server started", "addr", addr, "tls", tlsConfig != nil)
+		var err error
+		if tlsConfig != nil {
+			// Сертификат уже загружен в srv.TLSConfig, поэтому пути пустые.
+			err = srv.ListenAndServeTLS("", "")
+		} else {
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()
@@ -126,4 +146,22 @@ func getenv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// loadTLSConfig загружает сертификат и ключ. Если оба пути пусты, возвращает nil — TLS выключен.
+func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
+	if certFile == "" && keyFile == "" {
+		return nil, nil
+	}
+	if certFile == "" || keyFile == "" {
+		return nil, errors.New("both TLS_CERT_FILE and TLS_KEY_FILE must be set")
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS certificate: %w", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}, nil
 }
