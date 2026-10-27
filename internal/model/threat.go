@@ -19,6 +19,6 @@ type Threat struct {
 }
 
 var (
-	ErrNotFound = errors.New("threat not found")
+	ErrNotFound      = errors.New("threat not found")
 	ErrAlreadyExists = errors.New("threat already exists")
 )
