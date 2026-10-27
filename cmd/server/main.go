@@ -4,6 +4,7 @@
 //
 //	HTTP_ADDR     адрес, на котором слушает сервер (по умолчанию ":8080")
 //	DATABASE_URL  строка подключения к PostgreSQL
+//	API_KEYS      API-ключи с ролями: "key1:writer,key2:reader" (ключ — не короче 16 символов)
 package main
 
 import (
@@ -26,7 +27,11 @@ import (
 	"github.com/d4m0n1/threat-service/internal/storage"
 )
 
-const maxBodyBytes = 1 << 20 // 1 МБ
+const (
+	maxBodyBytes   = 1 << 20 // 1 МБ
+	rateLimitRPS   = 10      // запросов в секунду с одного IP в среднем
+	rateLimitBurst = 20      // допустимый всплеск
+)
 
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
@@ -41,9 +46,17 @@ func run(log *slog.Logger) error {
 	addr := getenv("HTTP_ADDR", ":8080")
 	dbURL := getenv("DATABASE_URL", "postgres://threat:threat@localhost:5434/threats?sslmode=disable")
 
+	apiKeys, err := middleware.ParseAPIKeys(os.Getenv("API_KEYS"))
+	if err != nil {
+		return fmt.Errorf("parse API_KEYS: %w", err)
+	}
+
 	// ctx отменяется по Ctrl+C или SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	limiter := middleware.NewRateLimiter(rateLimitRPS, rateLimitBurst)
+	go limiter.Cleanup(ctx, time.Minute, 5*time.Minute)
 
 	pool, err := pgxpool.New(ctx, dbURL)
 	if err != nil {
@@ -68,10 +81,13 @@ func run(log *slog.Logger) error {
 	mux := http.NewServeMux()
 	api.HandlerFromMux(strict, mux)
 
-	// Порядок выполнения: логирование -> recover -> лимит тела -> валидация -> маршрутизация -> handler.
+	// Порядок выполнения: логирование -> recover -> rate-limit -> авторизация ->
+	// лимит тела -> валидация -> маршрутизация -> handler.
 	var root http.Handler = mux
 	root = validator(root)
 	root = http.MaxBytesHandler(root, maxBodyBytes)
+	root = middleware.Auth(apiKeys)(root)
+	root = limiter.Middleware(root)
 	root = middleware.Recover(log)(root)
 	root = middleware.Logging(log)(root)
 
