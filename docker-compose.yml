@@ -1,3 +1,10 @@
+# Ротация логов контейнеров: по умолчанию Docker не ограничивает их размер.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: postgres:17-alpine
@@ -15,6 +22,24 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    logging: *logging
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://threat:threat@db:5432/threats?sslmode=disable
+      API_KEYS: ${API_KEYS:?API_KEYS is not set, copy .env.example to .env}
+      TLS_CERT_FILE: /certs/server.crt
+      TLS_KEY_FILE: /certs/server.key
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./certs:/certs:ro
+    restart: unless-stopped
+    logging: *logging
 
 volumes:
   pgdata:
