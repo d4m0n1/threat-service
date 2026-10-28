@@ -23,7 +23,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/d4m0n1/threat-service/internal/api"
 	"github.com/d4m0n1/threat-service/internal/handler"
 	"github.com/d4m0n1/threat-service/internal/middleware"
 	"github.com/d4m0n1/threat-service/internal/service"
@@ -80,23 +79,14 @@ func run(log *slog.Logger) error {
 	}
 
 	svc := service.New(storage.New(pool))
-	strict := api.NewStrictHandlerWithOptions(handler.New(svc), nil, api.StrictHTTPServerOptions{
-		RequestErrorHandlerFunc:  handler.RequestErrorHandler,
-		ResponseErrorHandlerFunc: handler.NewResponseErrorHandler(log),
-	})
-
-	validator, err := handler.NewValidator()
+	router, err := handler.NewRouter(svc, log)
 	if err != nil {
 		return err
 	}
 
-	mux := http.NewServeMux()
-	api.HandlerFromMux(strict, mux)
-
 	// Порядок выполнения: логирование -> recover -> rate-limit -> авторизация ->
 	// лимит тела -> валидация -> маршрутизация -> handler.
-	var root http.Handler = mux
-	root = validator(root)
+	root := router
 	root = http.MaxBytesHandler(root, maxBodyBytes)
 	root = middleware.Auth(apiKeys)(root)
 	root = limiter.Middleware(root)
