@@ -19,13 +19,16 @@ func NewValidator() (func(http.Handler) http.Handler, error) {
 		return nil, fmt.Errorf("load openapi spec: %w", err)
 	}
 
+	// Авторизацию проверяет middleware Auth, поэтому секцию security валидатору не передаём:
+	// он проверяет только данные запроса. Иначе kin-openapi читает тело ещё на этапе
+	// проверки security и превращает ошибки чтения в 401.
+	spec.Security = nil
+
 	return nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
 		// В спеке указан servers: https://localhost:8443 — без этой опции валидатор
 		// отклонял бы запросы, пришедшие на другой хост или порт.
 		DoNotValidateServers: true,
 		Options: openapi3filter.Options{
-			// API-ключ проверяется отдельным middleware, здесь секцию security пропускаем.
-			AuthenticationFunc: openapi3filter.NoopAuthenticationFunc,
 			// Не выводить в ответах JSON-схему поля, только суть ошибки.
 			SchemaValidationOptions: []openapi3.SchemaValidationOption{
 				openapi3.DisableSchemaErrorDetails(),

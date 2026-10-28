@@ -30,9 +30,11 @@ import (
 )
 
 const (
-	maxBodyBytes   = 1 << 20 // 1 МБ
-	rateLimitRPS   = 10      // запросов в секунду с одного IP в среднем
-	rateLimitBurst = 20      // допустимый всплеск
+	maxBodyBytes   = 1 << 20         // 1 МБ
+	requestTimeout = 5 * time.Second // меньше WriteTimeout, чтобы ответ об ошибке успел уйти
+	pingTimeout    = 5 * time.Second
+	rateLimitRPS   = 10 // запросов в секунду с одного IP в среднем
+	rateLimitBurst = 20 // допустимый всплеск
 )
 
 func main() {
@@ -74,7 +76,9 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("create db pool: %w", err)
 	}
 	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(ctx, pingTimeout)
+	defer pingCancel()
+	if err := pool.Ping(pingCtx); err != nil {
 		return fmt.Errorf("connect to db: %w", err)
 	}
 
@@ -84,18 +88,9 @@ func run(log *slog.Logger) error {
 		return err
 	}
 
-	// Порядок выполнения: логирование -> recover -> rate-limit -> авторизация ->
-	// лимит тела -> валидация -> маршрутизация -> handler.
-	root := router
-	root = http.MaxBytesHandler(root, maxBodyBytes)
-	root = middleware.Auth(apiKeys)(root)
-	root = limiter.Middleware(root)
-	root = middleware.Recover(log)(root)
-	root = middleware.Logging(log)(root)
-
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           root,
+		Handler:           newHandler(router, apiKeys, limiter, requestTimeout, log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -128,6 +123,20 @@ func run(log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// newHandler оборачивает роутер API в цепочку middleware.
+// Порядок выполнения: логирование -> recover -> rate-limit -> авторизация ->
+// лимит тела -> таймаут -> валидация и обработчики (router).
+// Авторизация стоит до лимита тела, чтобы не читать тело от клиента без ключа.
+func newHandler(router http.Handler, keys middleware.APIKeys, limiter *middleware.RateLimiter,
+	timeout time.Duration, log *slog.Logger) http.Handler {
+	h := middleware.Timeout(timeout)(router)
+	h = middleware.BodyLimit(maxBodyBytes)(h)
+	h = middleware.Auth(keys)(h)
+	h = limiter.Middleware(h)
+	h = middleware.Recover(log)(h)
+	return middleware.Logging(log)(h)
 }
 
 // getenv возвращает значение переменной окружения или def, если она не задана.
